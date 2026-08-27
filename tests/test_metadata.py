@@ -37,6 +37,16 @@ class FakeTransferError(Exception):
         self.http_status = http_status
 
 
+class FakeResponse:
+    """Mimics GlobusHTTPResponse: indexable, with the document on .data."""
+
+    def __init__(self, data):
+        self.data = data
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+
 class FakeClient:
     def __init__(self, raises=None, endpoint=None):
         self._raises = raises
@@ -57,7 +67,7 @@ class FakeClient:
     def operation_stat(self, cid, path=None):
         if self._raises:
             raise self._raises
-        return LS_DOC[0]
+        return FakeResponse(LS_DOC[0])
 
 
 @pytest.fixture(autouse=True)
@@ -107,7 +117,9 @@ def test_info_reports_real_size():
 def test_unix_special_types_report_as_file():
     """fsspec has no vocabulary for pipes/devices; only dir-ness matters."""
     client = FakeClient()
-    client.operation_stat = lambda cid, path=None: {"name": "p", "type": "pipe"}
+    client.operation_stat = lambda cid, path=None: FakeResponse(
+        {"name": "p", "type": "pipe"}
+    )
     info = TransferMetadata(client).info(UUID, "p")
     assert info["type"] == "file"
     assert info["globus_type"] == "pipe"
@@ -148,3 +160,66 @@ def test_collection_without_https_is_a_clear_error():
 def test_listing_without_metadata_still_fails_loudly():
     with pytest.raises(NotImplementedError, match="Transfer API"):
         fs().ls("data")
+
+
+def test_relative_paths_are_anchored_at_collection_root():
+    """Regression: Globus resolves relative paths against /~/, not /.
+
+    `ls("home")` became `/~/home` and 404'd while `/home` listed fine, so
+    every nested listing failed after the first level.
+    """
+    seen = []
+
+    class Recorder(FakeClient):
+        def operation_ls(self, cid, path=None):
+            seen.append(path)
+            return LS_DOC
+
+    TransferMetadata(Recorder()).ls(UUID, "home")
+    assert seen == ["/home"]
+
+
+def test_empty_path_lists_root():
+    seen = []
+
+    class Recorder(FakeClient):
+        def operation_ls(self, cid, path=None):
+            seen.append(path)
+            return LS_DOC
+
+    TransferMetadata(Recorder()).ls(UUID, "")
+    assert seen == ["/"]
+
+
+def test_resolved_urls_are_mapped_back_to_paths():
+    """Regression: _open() resolves to a URL, then fsspec calls info() with it.
+
+    Transfer speaks collection paths, so the URL has to be converted back
+    or it is sent verbatim as a path (yielding a nonsense
+    /https://host/... and a 403 from the endpoint).
+    """
+    f = GlobusFileSystem(
+        collection_id=UUID,
+        https_url="https://example.data.globus.org",
+        metadata=meta(),
+        skip_instance_cache=True,
+    )
+    assert (
+        f._unresolve("https://example.data.globus.org/home/x.txt")
+        == f"{UUID}/home/x.txt"
+    )
+    # Plain paths pass through untouched.
+    assert f._unresolve("home/x.txt") == "home/x.txt"
+
+
+def test_globus_response_objects_are_unwrapped():
+    """Regression: dict() on a GlobusHTTPResponse raises KeyError.
+
+    It iterates as a sequence; .data is the underlying document.
+    """
+
+    client = FakeClient()
+    client.operation_stat = lambda cid, path=None: FakeResponse(
+        {"name": "f.txt", "type": "file", "size": 12}
+    )
+    assert TransferMetadata(client).info(UUID, "f.txt")["size"] == 12

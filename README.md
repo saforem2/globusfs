@@ -3,11 +3,11 @@
 An [fsspec](https://filesystem-spec.readthedocs.io/) filesystem for
 [Globus](https://www.globus.org/) collections.
 
-> **Status: working, lightly tested.** Ranged reads, `open()`, `info()`,
-> Transfer-backed `ls`, and login are implemented. Verified end to end by
-> reading one column out of a 60-column parquet file over `globus://`
-> with pyarrow — 1,963 bytes materialized instead of 360 KB — against a
-> collection that was intermittently failing at the time.
+> **Status: working.** Verified end to end against two live collections:
+> authenticated `ls`/`info`/`open` on Globus Tutorial Collection 1, and
+> anonymous pyarrow column projection on a public collection (one column
+> of sixty — a few KB instead of 360 KB) while that collection was
+> intermittently returning backend-fault 404s.
 
 ```python
 import globusfs

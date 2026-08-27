@@ -82,28 +82,41 @@ class TransferMetadata:
             )
         return str(url).rstrip("/")
 
+    @staticmethod
+    def _abs(path: str) -> str:
+        """Anchor a path at the collection root.
+
+        Globus resolves a *relative* path against ``/~/`` (the mapped
+        user's home), so ``home`` becomes ``/~/home`` and 404s while
+        ``/home`` lists fine. Paths reaching here have already been
+        stripped of their protocol and leading slash by fsspec, so
+        absoluteness has to be restored or every nested listing fails.
+        """
+        return "/" + path.lstrip("/") if path else "/"
+
     def info(self, collection_id: str, path: str) -> dict[str, Any]:
         """Stat one path. Raises FileNotFoundError if genuinely absent."""
         globus_sdk = _require_sdk()
         try:
-            res = self._client.operation_stat(collection_id, path=path or "/")
+            res = self._client.operation_stat(collection_id, path=self._abs(path))
         except globus_sdk.TransferAPIError as exc:
             raise self._translate(exc, collection_id, path) from exc
-        return _stat_to_info(dict(res), path)
+        # GlobusHTTPResponse is not dict()-able (dict() iterates it as a
+        # sequence and fails); .data is the underlying document.
+        return _stat_to_info(res.data, path)
 
     def ls(
         self, collection_id: str, path: str, detail: bool = True
     ) -> list[dict[str, Any]] | list[str]:
         globus_sdk = _require_sdk()
         try:
-            res = self._client.operation_ls(collection_id, path=path or "/")
+            res = self._client.operation_ls(collection_id, path=self._abs(path))
         except globus_sdk.TransferAPIError as exc:
             raise self._translate(exc, collection_id, path) from exc
 
         base = path.rstrip("/")
         out = [
-            _stat_to_info(dict(e), f"{base}/{e['name']}" if base else e["name"])
-            for e in res
+            _stat_to_info(e, f"{base}/{e['name']}" if base else e["name"]) for e in res
         ]
         return out if detail else [e["name"] for e in out]
 

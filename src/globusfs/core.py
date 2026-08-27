@@ -279,11 +279,33 @@ class GlobusFileSystem(HTTPFileSystem):
         return self.metadata
 
     def ls(self, path, detail=True, **kwargs):
-        collection, rel = self.split_path(path)
+        collection, rel = self.split_path(self._unresolve(path))
         return self._metadata("ls").ls(collection, rel, detail=detail)
 
     async def _ls(self, path, detail=True, **kwargs):
         return self.ls(path, detail=detail, **kwargs)
+
+    def _unresolve(self, path: str) -> str:
+        """Inverse of :meth:`_url` for a base this filesystem knows.
+
+        ``_open`` hands the parent a resolved URL, and fsspec then calls
+        back into ``info``/``ls`` with it. Transfer speaks collection
+        paths, not URLs, so a URL coming back in has to be turned back
+        into ``uuid/rel`` before it is used as a path.
+        """
+        if not path.startswith(("http://", "https://")):
+            return path
+        bases = [self._https_url] if self._https_url else []
+        bases += list(self._base_cache.values())
+        for base in bases:
+            if base and path.startswith(base):
+                rel = path[len(base) :].lstrip("/")
+                collection = next(
+                    (c for c, b in self._base_cache.items() if b == base),
+                    self.collection_id,
+                )
+                return f"{collection}/{rel}" if collection else rel
+        return path
 
     def info(self, path, **kwargs):
         """Stat a path, preferring the Transfer API.
@@ -298,7 +320,7 @@ class GlobusFileSystem(HTTPFileSystem):
         The fallback can only ever report a file. Directory detection
         genuinely requires Transfer.
         """
-        collection, rel = self.split_path(path)
+        collection, rel = self.split_path(self._unresolve(path))
         if self.metadata is not None:
             return self.metadata.info(collection, rel)
         return {
