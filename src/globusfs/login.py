@@ -28,6 +28,46 @@ DEFAULT_TOKEN_PATH = Path(
 )
 
 
+def _require_sdk():
+    """Import globus_sdk, or explain how to get it.
+
+    Deliberately narrow: it reports a *missing package* only when the
+    package is genuinely missing. An earlier version wrapped a wider
+    block and told users to install a dependency they already had,
+    hiding the real error (a renamed submodule).
+    """
+    try:
+        import globus_sdk
+    except ImportError as exc:  # pragma: no cover - trivial
+        raise ImportError(
+            "Logging in to Globus needs globus-sdk. "
+            "Install with: pip install 'globusfs[auth]'"
+        ) from exc
+    return globus_sdk
+
+
+def _json_token_storage(globus_sdk):
+    """Locate ``JSONTokenStorage`` across globus-sdk versions.
+
+    Renamed from ``globus_sdk.tokenstorage`` (v3) to
+    ``globus_sdk.token_storage`` (v4). Both are supported, so the
+    dependency floor does not have to jump a major version.
+    """
+    try:
+        from globus_sdk.token_storage import JSONTokenStorage  # v4+
+    except ImportError:
+        try:
+            from globus_sdk.tokenstorage import JSONTokenStorage  # v3
+        except ImportError as exc:
+            raise ImportError(
+                f"Cannot locate JSONTokenStorage in globus-sdk "
+                f"{getattr(globus_sdk, '__version__', '?')}: tried "
+                f"globus_sdk.token_storage (v4) and globus_sdk.tokenstorage "
+                f"(v3). Please report this with your globus-sdk version."
+            ) from exc
+    return JSONTokenStorage
+
+
 def collection_scopes(collection_id: str, data_access: bool = True) -> list[str]:
     """Scopes needed to read one collection over HTTPS.
 
@@ -51,11 +91,8 @@ def login(
 
     Returns a ``globus_sdk.UserApp`` usable for both Transfer and HTTPS.
     """
-    try:
-        import globus_sdk
-        from globus_sdk.tokenstorage import JSONTokenStorage
-    except ImportError as exc:  # pragma: no cover
-        raise ImportError("pip install 'globusfs[auth]'") from exc
+    globus_sdk = _require_sdk()
+    JSONTokenStorage = _json_token_storage(globus_sdk)
 
     token_path = Path(token_path)
     token_path.parent.mkdir(parents=True, exist_ok=True)

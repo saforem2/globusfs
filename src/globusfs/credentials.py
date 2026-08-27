@@ -121,9 +121,20 @@ class AppCredentials:
         self._lock = threading.Lock()
 
     def token_for(self, collection_id: str) -> str | None:
+        """Current access token for a collection, refreshing if needed.
+
+        Goes through ``GlobusApp.get_authorizer()`` rather than reading
+        stored token data directly: the authorizer owns refresh, so an
+        expired access token is renewed here instead of failing a read
+        partway through a long job.
+        """
         with self._lock:
-            data = self._app.get_token_data(collection_id)
-            return None if data is None else data.access_token
+            authorizer = self._app.get_authorizer(collection_id)
+            # RefreshTokenAuthorizer renews on demand; others just hold one.
+            ensure = getattr(authorizer, "ensure_valid_token", None)
+            if ensure is not None:
+                ensure()
+            return getattr(authorizer, "access_token", None)
 
     def __repr__(self) -> str:
         return f"AppCredentials(scope_suffix={self._scope_suffix!r})"
