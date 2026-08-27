@@ -25,8 +25,11 @@ Public collections need no credentials — and no `globus-sdk`:
 ```python
 import fsspec, pyarrow.parquet as pq
 
-fs = fsspec.filesystem("globus", collection_id="isaac",
-                       https_url="https://g-05a4b6.2d513.8443.data.globus.org")
+fs = fsspec.filesystem(
+    "globus",
+    collection_id="isaac",
+    https_url="https://g-05a4b6.2d513.8443.data.globus.org",
+)
 
 with fs.open("isaac/ability/ALL_2007-01.parquet", "rb") as f:
     # Reads only the bytes this column needs, over HTTP range requests.
