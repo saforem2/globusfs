@@ -3,10 +3,10 @@
 An [fsspec](https://filesystem-spec.readthedocs.io/) filesystem for
 [Globus](https://www.globus.org/) collections.
 
-> **Status: early scaffold.** Byte reads against public collections work
-> via the inherited HTTP range path. Transfer-API listing and
-> `GlobusApp`-backed credentials are not implemented yet and raise
-> `NotImplementedError` rather than half-working.
+> **Status: early.** Ranged byte reads work, with retry logic for the
+> backend-fault-as-404 problem described below. Transfer-API listing
+> (`ls`/`info`) and `GlobusApp`-backed credentials are not implemented
+> yet and raise `NotImplementedError` rather than half-working.
 
 ```python
 import fsspec
@@ -50,9 +50,13 @@ Verified against a live collection:
 - **Suffix ranges (`bytes=-8`) return `416`**, which is how parquet
   readers typically seek to the footer. Because `info()` knows the true
   size, readers can use absolute offsets instead.
+- **`HEAD` is unusable.** A HEAD 404 carries no body — and the body is
+  the *only* thing distinguishing a backend fault from a real miss. So
+  HEAD results are permanently ambiguous. Size and existence come from
+  the Transfer API, or from a ranged `GET` (which does return a body and
+  carries the total in `Content-Range`).
 - **The HTTPS interface has no directory listings at all** — hence the
-  Transfer API for metadata. Directory responses cannot be characterized
-  reliably from HTTPS alone, which is a further reason not to try.
+  Transfer API for metadata.
 
 ## Credentials
 
