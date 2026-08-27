@@ -144,3 +144,24 @@ def test_real_miss_is_not_flagged_transient():
         if r.status_code == 404 and not is_transient(r):
             return  # got a clean, real 404 -- exactly what we want to see
     pytest.skip("could not observe a clean 404 (collection degraded)")
+
+
+def test_open_ended_range_reveals_size():
+    """`bytes=0-` exposes the real extent; `bytes=0-0` does not.
+
+    GCS answers a one-byte probe with `Content-Range: bytes 0-0/*` --
+    total elided. The open-ended form gives `bytes 0-<last>/*`, which is
+    how info() recovers a size without a (unclassifiable) HEAD.
+    """
+    r = fetch("GET", FILE, headers={"Range": "bytes=0-"})
+    assert r.status_code == 206
+    span = r.headers["Content-Range"].removeprefix("bytes ").partition("/")[0]
+    lo, _, hi = span.partition("-")
+    assert int(hi) - int(lo) + 1 == SIZE
+
+
+def test_one_byte_probe_hides_total():
+    """Documents why the open-ended form is required."""
+    r = fetch("GET", FILE, headers={"Range": "bytes=0-0"})
+    assert r.status_code == 206
+    assert r.headers["Content-Range"].endswith("/*")

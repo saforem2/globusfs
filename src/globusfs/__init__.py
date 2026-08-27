@@ -8,6 +8,9 @@ from .credentials import (
     GlobusCredentials,
     StaticToken,
 )
+from .errors import GlobusFSError, TransientBackendError
+from .login import filesystem, login
+from .transfer import TransferMetadata
 
 __version__ = "0.1.0.dev0"
 
@@ -16,6 +19,11 @@ __all__ = [
     "AppCredentials",
     "CallableToken",
     "GlobusCredentials",
+    "GlobusFSError",
     "GlobusFileSystem",
     "StaticToken",
+    "TransferMetadata",
+    "TransientBackendError",
+    "filesystem",
+    "login",
 ]

@@ -1,0 +1,150 @@
+"""Transfer-API-backed ls/info, against a fake TransferClient.
+
+A fake rather than the real service: Transfer needs a user identity, and
+the logic worth testing here (document translation, error mapping) is
+ours, not Globus's.
+"""
+
+import pytest
+
+from globusfs import GlobusFileSystem
+from globusfs.errors import TransientBackendError
+from globusfs.transfer import TransferMetadata
+
+UUID = "6c54cade-bde5-45c1-bdea-f4bd71dba2cc"
+
+LS_DOC = [
+    {
+        "name": "a.parquet",
+        "type": "file",
+        "size": 360059,
+        "last_modified": "2026-01-02 03:04:05+00:00",
+    },
+    {
+        "name": "sub",
+        "type": "dir",
+        "size": 4096,
+        "last_modified": "2026-01-02 03:04:05+00:00",
+    },
+]
+
+
+class FakeTransferError(Exception):
+    def __init__(self, code="", message="", http_status=None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.http_status = http_status
+
+
+class FakeClient:
+    def __init__(self, raises=None, endpoint=None):
+        self._raises = raises
+        self._endpoint = (
+            endpoint
+            if endpoint is not None
+            else {"https_server": "https://example.data.globus.org"}
+        )
+
+    def get_endpoint(self, cid):
+        return self._endpoint
+
+    def operation_ls(self, cid, path=None):
+        if self._raises:
+            raise self._raises
+        return LS_DOC
+
+    def operation_stat(self, cid, path=None):
+        if self._raises:
+            raise self._raises
+        return LS_DOC[0]
+
+
+@pytest.fixture(autouse=True)
+def _fake_sdk(monkeypatch):
+    """Stand in for globus_sdk so TransferAPIError matches our fake."""
+    import globusfs.transfer as t
+
+    class FakeSDK:
+        TransferAPIError = FakeTransferError
+
+    monkeypatch.setattr(t, "_require_sdk", lambda: FakeSDK)
+
+
+def meta(**kw):
+    return TransferMetadata(FakeClient(**kw))
+
+
+def fs(**kw):
+    return GlobusFileSystem(
+        collection_id=UUID, https_url="https://x", skip_instance_cache=True, **kw
+    )
+
+
+def test_ls_translates_globus_documents():
+    out = fs(metadata=meta()).ls(f"globus://{UUID}/data")
+    assert [e["type"] for e in out] == ["file", "directory"]
+    assert out[0]["size"] == 360059
+    assert out[0]["name"] == "data/a.parquet"
+
+
+def test_ls_detail_false_returns_names():
+    assert fs(metadata=meta()).ls(f"globus://{UUID}/data", detail=False) == [
+        "data/a.parquet",
+        "data/sub",
+    ]
+
+
+def test_info_reports_real_size():
+    """The point of using Transfer for metadata: a true size.
+
+    With it, readers can address a parquet footer absolutely and dodge
+    the 416-on-suffix-range quirk.
+    """
+    assert fs(metadata=meta()).info(f"globus://{UUID}/a.parquet")["size"] == 360059
+
+
+def test_unix_special_types_report_as_file():
+    """fsspec has no vocabulary for pipes/devices; only dir-ness matters."""
+    client = FakeClient()
+    client.operation_stat = lambda cid, path=None: {"name": "p", "type": "pipe"}
+    info = TransferMetadata(client).info(UUID, "p")
+    assert info["type"] == "file"
+    assert info["globus_type"] == "pipe"
+
+
+def test_missing_path_raises_filenotfound():
+    err = FakeTransferError(code="ClientError.NotFound", http_status=404)
+    with pytest.raises(FileNotFoundError):
+        fs(metadata=meta(raises=err)).ls(f"globus://{UUID}/nope")
+
+
+def test_backend_fault_is_not_filenotfound():
+    """Same rule as the byte path: a fault must never look like absence."""
+    err = FakeTransferError(
+        code="ExternalError.DirListingFailed", message="GCS Manager Internal Error"
+    )
+    with pytest.raises(TransientBackendError) as exc:
+        fs(metadata=meta(raises=err)).ls(f"globus://{UUID}/data")
+    assert not isinstance(exc.value, FileNotFoundError)
+
+
+def test_resolves_https_url_from_collection():
+    f = GlobusFileSystem(collection_id=UUID, metadata=meta(), skip_instance_cache=True)
+    assert f._resolve_base(UUID) == "https://example.data.globus.org"
+
+
+def test_collection_without_https_is_a_clear_error():
+    """Not every collection serves HTTPS; say so plainly."""
+    f = GlobusFileSystem(
+        collection_id=UUID,
+        skip_instance_cache=True,
+        metadata=meta(endpoint={"https_server": None}),
+    )
+    with pytest.raises(ValueError, match="no https_server"):
+        f._resolve_base(UUID)
+
+
+def test_listing_without_metadata_still_fails_loudly():
+    with pytest.raises(NotImplementedError, match="Transfer API"):
+        fs().ls("data")

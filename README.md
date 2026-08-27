@@ -3,16 +3,34 @@
 An [fsspec](https://filesystem-spec.readthedocs.io/) filesystem for
 [Globus](https://www.globus.org/) collections.
 
-> **Status: early.** Ranged byte reads work, with retry logic for the
-> backend-fault-as-404 problem described below. Transfer-API listing
-> (`ls`/`info`) and `GlobusApp`-backed credentials are not implemented
-> yet and raise `NotImplementedError` rather than half-working.
+> **Status: working, lightly tested.** Ranged reads, `open()`, `info()`,
+> Transfer-backed `ls`, and login are implemented. Verified end to end by
+> reading one column out of a 60-column parquet file over `globus://`
+> with pyarrow — 1,963 bytes materialized instead of 360 KB — against a
+> collection that was intermittently failing at the time.
 
 ```python
-import fsspec
+import globusfs
 
-with fsspec.open("globus://<collection-uuid>/path/to/file.parquet") as f:
+# Browser login once; tokens persist to ~/.globusfs/tokens.json
+fs = globusfs.filesystem("<collection-uuid>")
+
+fs.ls("/")
+with fs.open("data/file.parquet", "rb") as f:
     ...
+```
+
+Public collections need no credentials — and no `globus-sdk`:
+
+```python
+import fsspec, pyarrow.parquet as pq
+
+fs = fsspec.filesystem("globus", collection_id="isaac",
+                       https_url="https://g-05a4b6.2d513.8443.data.globus.org")
+
+with fs.open("isaac/ability/ALL_2007-01.parquet", "rb") as f:
+    # Reads only the bytes this column needs, over HTTP range requests.
+    table = pq.ParquetFile(f).read(columns=["author"])
 ```
 
 ## Why

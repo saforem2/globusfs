@@ -39,6 +39,7 @@ import asyncio
 import logging
 from typing import Any
 
+from fsspec.asyn import sync
 from fsspec.implementations.http import HTTPFileSystem
 
 from .credentials import AnonymousCredentials, GlobusCredentials
@@ -50,6 +51,26 @@ __all__ = ["GlobusFileSystem"]
 
 DEFAULT_RETRIES = 5
 DEFAULT_BACKOFF = 0.3
+
+
+class _RetryingFetcher:
+    """Block fetcher that routes through the transient-404 retry path.
+
+    ``HTTPFile.async_fetch_range`` calls ``raise_for_status()`` directly,
+    so a backend fault reaches the caller as a bare 404 with no
+    classification -- the exact failure this package exists to prevent.
+    Substituting the fetcher puts file-object reads on the same footing
+    as ``cat_file``.
+
+    A class rather than a closure so the file object stays picklable.
+    """
+
+    def __init__(self, fs: GlobusFileSystem, url: str) -> None:
+        self.fs = fs
+        self.url = url
+
+    def __call__(self, start, end):
+        return sync(self.fs.loop, self.fs._cat_file, self.url, start=start, end=end)
 
 
 class GlobusFileSystem(HTTPFileSystem):
@@ -81,6 +102,7 @@ class GlobusFileSystem(HTTPFileSystem):
         https_url: str | None = None,
         retries: int = DEFAULT_RETRIES,
         backoff: float = DEFAULT_BACKOFF,
+        metadata: Any = None,
         **kwargs: Any,
     ) -> None:
         self.collection_id = collection_id
@@ -88,6 +110,10 @@ class GlobusFileSystem(HTTPFileSystem):
         self._https_url = https_url.rstrip("/") if https_url else None
         self.retries = retries
         self.backoff = backoff
+        # TransferMetadata (or a stand-in). Optional: the byte path works
+        # without it, so reading public data needs no globus-sdk.
+        self.metadata = metadata
+        self._base_cache: dict[str, str] = {}
         super().__init__(**kwargs)
 
     @property
@@ -125,7 +151,15 @@ class GlobusFileSystem(HTTPFileSystem):
         return head, tail
 
     def _url(self, path: str) -> str:
-        """Full HTTPS URL for a globus path."""
+        """Full HTTPS URL for a globus path.
+
+        Idempotent: an already-resolved ``https://`` URL passes through
+        unchanged. fsspec re-enters with whatever it was handed (``_open``
+        resolves, then the parent calls ``info`` with the result), so
+        resolving twice must not double the prefix.
+        """
+        if path.startswith(("http://", "https://")):
+            return path
         collection, rel = self.split_path(path)
         return (
             f"{self._resolve_base(collection)}/{rel}"
@@ -134,13 +168,20 @@ class GlobusFileSystem(HTTPFileSystem):
         )
 
     def _resolve_base(self, collection_id: str) -> str:
-        """Map a collection UUID to its ``https_url``."""
+        """Map a collection UUID to its ``https_url``, caching the result."""
         if self._https_url:
             return self._https_url
-        raise NotImplementedError(
-            "Resolving collection UUID -> https_url via the Transfer API is "
-            "not implemented yet. Pass https_url= explicitly for now."
-        )
+        if collection_id in self._base_cache:
+            return self._base_cache[collection_id]
+        if self.metadata is None:
+            raise ValueError(
+                f"Cannot resolve collection {collection_id} to a URL: pass "
+                f"https_url= if you know it, or metadata= (a TransferMetadata) "
+                f"to look it up."
+            )
+        base = self.metadata.https_url(collection_id)
+        self._base_cache[collection_id] = base
+        return base
 
     # ------------------------------------------------------------ requests
 
@@ -220,29 +261,103 @@ class GlobusFileSystem(HTTPFileSystem):
 
     # -------------------------------------------------------------- listing
 
-    # NOTE: both the async and sync forms are overridden here on purpose.
+    # NOTE: both the async and sync forms are overridden on purpose.
     # fsspec's mirror_sync_methods only wires sync `ls` -> `_ls` when the
     # sync version is still AbstractFileSystem's default; HTTPFileSystem
     # binds its own, so overriding `_ls` alone leaves the parent's HTML
-    # link-scraping in place and the override never runs.
+    # link-scraping in place and the override silently never runs.
 
-    _LS_MSG = (
-        "ls() requires the Transfer API (operation_ls); the Globus HTTPS "
-        "interface does not support directory listings."
-    )
-    _INFO_MSG = (
-        "info() must come from the Transfer API (operation_stat); the Globus "
-        "HTTPS interface exposes no reliable metadata."
+    _NEED_META = (
+        "{op}() needs the Transfer API: the Globus HTTPS interface has no "
+        "directory listings and its HEAD responses cannot be classified. "
+        "Construct with metadata=TransferMetadata(...) -- see the README."
     )
 
-    async def _ls(self, path, detail=True, **kwargs):
-        raise NotImplementedError(self._LS_MSG)
+    def _metadata(self, op: str):
+        if self.metadata is None:
+            raise NotImplementedError(self._NEED_META.format(op=op))
+        return self.metadata
 
     def ls(self, path, detail=True, **kwargs):
-        raise NotImplementedError(self._LS_MSG)
+        collection, rel = self.split_path(path)
+        return self._metadata("ls").ls(collection, rel, detail=detail)
 
-    async def _info(self, path, **kwargs):
-        raise NotImplementedError(self._INFO_MSG)
+    async def _ls(self, path, detail=True, **kwargs):
+        return self.ls(path, detail=detail, **kwargs)
 
     def info(self, path, **kwargs):
-        raise NotImplementedError(self._INFO_MSG)
+        """Stat a path, preferring the Transfer API.
+
+        Falls back to a **ranged GET** when no Transfer client is
+        configured, so anonymous public reads keep working: ``open()``
+        needs a size, and a plain HEAD cannot supply one safely (a HEAD
+        404 has no body, so it cannot be told apart from a backend
+        fault). A ranged GET returns a body and puts the total in
+        ``Content-Range``.
+
+        The fallback can only ever report a file. Directory detection
+        genuinely requires Transfer.
+        """
+        collection, rel = self.split_path(path)
+        if self.metadata is not None:
+            return self.metadata.info(collection, rel)
+        return {
+            "name": self._strip_protocol(path),
+            "size": self._size_via_range(path),
+            "type": "file",
+        }
+
+    def _size_via_range(self, path) -> int | None:
+        """Total size via an open-ended ranged GET.
+
+        Uses ``Range: bytes=0-`` rather than ``bytes=0-0``: GCS reports
+        the total as ``*`` in Content-Range (``bytes 0-0/*``), so a
+        one-byte probe cannot see the size. The open-ended form answers
+        ``bytes 0-<last>/*`` with a matching Content-Length, which does.
+        The body is never read, so this costs headers, not bytes.
+        """
+        url = self._url(path)
+
+        async def attempt():
+            headers = {"Range": "bytes=0-"}
+            headers.update(self._auth_headers(path))
+            session = await self.set_session()
+            async with session.get(
+                self.encode_url(url), headers=headers, **self.kwargs
+            ) as r:
+                if r.status >= 400:
+                    await self._check(r, url)
+                start, _, last = (
+                    r.headers.get("Content-Range", "")
+                    .removeprefix("bytes ")
+                    .partition("/")[0]
+                    .partition("-")
+                )
+                if start.isdigit() and last.isdigit():
+                    return int(last) - int(start) + 1
+                cl = r.headers.get("Content-Length")
+                return int(cl) if cl and cl.isdigit() else None
+
+        return sync(self.loop, self._retry, attempt, f"info({path})")
+
+    def _open(self, path, mode="rb", **kwargs):
+        """Open by resolved URL, with retry-aware block fetches.
+
+        Two fixes over the parent. It builds its file object straight
+        from the path it is handed (``uuid/rel``, not a URL), so the URL
+        is resolved first. And ``HTTPFile.async_fetch_range`` calls
+        ``raise_for_status()`` directly, bypassing the transient-404
+        classification -- so the returned file's fetcher is wrapped to
+        route block reads through :meth:`_cat_file`, which retries.
+        """
+        f = super()._open(self._url(path), mode=mode, **kwargs)
+        # The cache binds `self.fetcher = f._fetch_range` at construction,
+        # so rebinding the method afterwards is too late -- the cache must
+        # be repointed as well.
+        f._fetch_range = _RetryingFetcher(self, self._url(path))
+        if getattr(f, "cache", None) is not None:
+            f.cache.fetcher = f._fetch_range
+        return f
+
+    async def _info(self, path, **kwargs):
+        return self.info(path, **kwargs)

@@ -125,3 +125,38 @@ def test_ranged_read(server):
     """Ranged reads must emit a Range header and return only those bytes."""
     assert fs(server).cat_file("test-uuid/data.bin", start=0, end=5) == PAYLOAD[:5]
     assert _Handler.last_range == "bytes=0-4"
+
+
+def test_file_object_reads_also_retry(server):
+    """open().read() must retry too, not just cat_file().
+
+    HTTPFile.async_fetch_range calls raise_for_status() directly, so
+    without substituting the fetcher a backend fault escapes the
+    classifier and surfaces as a bare 404 -- precisely the bug this
+    package exists to prevent. This is the regression test for that.
+    """
+    _Handler.fail_times = 3
+    with fs(server).open("test-uuid/data.bin", "rb") as f:
+        assert f.read(5) == PAYLOAD[:5]
+
+
+def test_size_probe_uses_open_ended_range(server):
+    """info() must use `bytes=0-`, not `bytes=0-0`.
+
+    GCS reports the total as `*` (`bytes 0-0/*`), so a one-byte probe
+    cannot see the size; the open-ended form answers with the real
+    extent.
+    """
+    assert fs(server).info("test-uuid/data.bin")["size"] == len(PAYLOAD)
+    assert _Handler.last_range == "bytes=0-"
+
+
+def test_info_falls_back_to_ranged_get(server):
+    """Without Transfer, info() still works well enough to open() a file.
+
+    It can only ever report "file" -- directory detection needs Transfer
+    -- but a size is enough for readers like pyarrow to seek.
+    """
+    info = fs(server).info("test-uuid/data.bin")
+    assert info["size"] == len(PAYLOAD)
+    assert info["type"] == "file"

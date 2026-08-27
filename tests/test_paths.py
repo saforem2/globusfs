@@ -47,9 +47,13 @@ def test_url_construction():
     assert fs()._url(f"globus://{UUID}/a/b.parquet") == f"{BASE}/a/b.parquet"
 
 
-def test_listing_fails_loudly():
-    """Unimplemented surface must raise, not silently return nothing."""
+def test_ls_without_metadata_fails_loudly():
+    """Listing genuinely requires Transfer: HTTPS has no directory listings.
+
+    info() deliberately does NOT fail here -- it falls back to a ranged
+    GET so anonymous public reads keep working (see
+    test_info_falls_back_to_ranged_get in test_transient_404.py). Only
+    ls has no possible fallback.
+    """
     with pytest.raises(NotImplementedError, match="Transfer API"):
         fs(collection_id=UUID).ls("a")
-    with pytest.raises(NotImplementedError, match="Transfer API"):
-        fs(collection_id=UUID).info("a")
