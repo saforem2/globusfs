@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "globusfs"
+version = "0.1.0.dev0"
+description = "fsspec filesystem for Globus collections"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Sam Foreman", email = "saforem2@gmail.com" }]
+keywords = ["globus", "fsspec", "filesystem", "hpc", "data"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Filesystems",
+]
+dependencies = [
+  # HTTPFileSystem (the ranged-read path we subclass) lives in fsspec but
+  # needs aiohttp, which fsspec does not pull in on its own.
+  "fsspec>=2023.1",
+  "aiohttp",
+]
+
+[project.optional-dependencies]
+# Only needed for Transfer-API listing and GlobusApp-backed credentials.
+# Anonymous reads work without it, which is what keeps the test fixture
+# usable in CI with no secrets.
+auth = ["globus-sdk>=3.30"]
+dev = ["pytest", "pytest-asyncio", "ruff", "requests"]
+
+# fsspec discovers backends through this entry point group, so
+# `fsspec.open("globus://...")` works after a plain install with no
+# explicit register_implementation() call by the user.
+[project.entry-points."fsspec.specs"]
+globus = "globusfs:GlobusFileSystem"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/globusfs"]
+
+[tool.pytest.ini_options]
+markers = [
+  "network: hits the public ISAAC collection; deselect with -m 'not network'",
+]
