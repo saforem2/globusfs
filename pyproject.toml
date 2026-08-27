@@ -29,7 +29,7 @@ dependencies = [
 # Anonymous reads work without it, which is what keeps the test fixture
 # usable in CI with no secrets.
 auth = ["globus-sdk>=3.30"]
-dev = ["pytest", "pytest-asyncio", "ruff", "requests"]
+dev = ["pytest", "pytest-asyncio", "ruff>=0.14", "requests"]
 
 # fsspec discovers backends through this entry point group, so
 # `fsspec.open("globus://...")` works after a plain install with no

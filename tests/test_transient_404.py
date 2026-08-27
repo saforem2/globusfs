@@ -32,7 +32,7 @@ class _Handler(BaseHTTPRequestHandler):
     body = TRANSIENT_BODY
     last_range = None
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         cls = type(self)
         cls.seen += 1
         if self.path.endswith("/gone"):
