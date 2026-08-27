@@ -70,9 +70,10 @@ def test_login_requests_transfer_and_collection_scopes(tmp_path):
     """Both services are needed: Transfer for ls/info, https for bytes."""
     app = globusfs.login(UUID, token_path=tmp_path / "tokens.json", run_flow=False)
     reqs = {rs: [str(s) for s in sc] for rs, sc in app.scope_requirements.items()}
-    assert (
+    # Prefix match, not equality: Transfer's scope carries data_access as
+    # a dependency -- see test_data_access_is_a_dependent_scope_of_transfer.
+    assert reqs["transfer.api.globus.org"][0].startswith(
         "urn:globus:auth:scope:transfer.api.globus.org:all"
-        in reqs["transfer.api.globus.org"]
     )
     assert any(s.endswith("/https") for s in reqs[UUID])
     assert any(s.endswith("/data_access") for s in reqs[UUID])
@@ -203,3 +204,32 @@ def test_login_does_not_reprompt_when_tokens_exist(tmp_path, monkeypatch):
     monkeypatch.setattr(globus_sdk, "UserApp", FakeApp)
     globusfs.login(UUID, token_path=tmp_path / "t.json")
     assert calls == []
+
+
+def test_data_access_is_a_dependent_scope_of_transfer():
+    """Regression: data_access must be nested inside the transfer scope.
+
+    Requested flat, the login succeeds and the tokens look complete, but
+    every operation_ls fails with 403 ConsentRequired:
+
+        urn:globus:auth:scope:transfer.api.globus.org:all[*.../data_access]
+
+    is the form the API demands.
+    """
+    app = globusfs.login(UUID, token_path="/tmp/globusfs-test.json", run_flow=False)
+    transfer = [str(s) for s in app.scope_requirements["transfer.api.globus.org"]]
+    assert len(transfer) == 1
+    assert transfer[0].startswith("urn:globus:auth:scope:transfer.api.globus.org:all[")
+    assert f"{UUID}/data_access" in transfer[0]
+
+
+def test_data_access_can_be_disabled():
+    """High Assurance collections do not use data_access."""
+    app = globusfs.login(
+        UUID,
+        token_path="/tmp/globusfs-test.json",
+        data_access=False,
+        run_flow=False,
+    )
+    transfer = [str(s) for s in app.scope_requirements["transfer.api.globus.org"]]
+    assert transfer == ["urn:globus:auth:scope:transfer.api.globus.org:all"]

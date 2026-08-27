@@ -107,8 +107,22 @@ def login(
     token_path = Path(token_path)
     token_path.parent.mkdir(parents=True, exist_ok=True)
 
-    requirements = {"transfer.api.globus.org": [TRANSFER_SCOPE]}
+    # Transfer needs data_access as a *dependent* scope, written
+    # `transfer:all[*<collection>/data_access]` -- not as a standalone
+    # requirement. Requesting it flat yields tokens that look complete but
+    # fail every operation_ls with 403 ConsentRequired.
+    transfer_scope = globus_sdk.Scope(TRANSFER_SCOPE)
+    if collection_id and data_access:
+        transfer_scope = transfer_scope.with_dependency(
+            globus_sdk.Scope(
+                f"https://auth.globus.org/scopes/{collection_id}/data_access",
+                optional=True,
+            )
+        )
+    requirements = {"transfer.api.globus.org": [transfer_scope]}
     if collection_id:
+        # The HTTPS scope stays a direct requirement of the collection
+        # itself; only Transfer needs the dependent form.
         requirements[collection_id] = collection_scopes(collection_id, data_access)
 
     config = globus_sdk.GlobusAppConfig(
