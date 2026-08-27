@@ -183,7 +183,9 @@ def test_login_actually_runs_the_flow(tmp_path, monkeypatch):
             calls.append("login")
 
     monkeypatch.setattr(globus_sdk, "UserApp", FakeApp)
-    globusfs.login(UUID, token_path=tmp_path / "t.json")
+    # data_access=False skips the detection probe, which would otherwise
+    # log in once for Transfer before re-entering with the answer.
+    globusfs.login(UUID, token_path=tmp_path / "t.json", data_access=False)
     assert calls == ["login"], "login() must run the flow, not just build the app"
 
 
@@ -202,7 +204,7 @@ def test_login_does_not_reprompt_when_tokens_exist(tmp_path, monkeypatch):
             calls.append("login")
 
     monkeypatch.setattr(globus_sdk, "UserApp", FakeApp)
-    globusfs.login(UUID, token_path=tmp_path / "t.json")
+    globusfs.login(UUID, token_path=tmp_path / "t.json", data_access=False)
     assert calls == []
 
 
@@ -233,3 +235,40 @@ def test_data_access_can_be_disabled():
     )
     transfer = [str(s) for s in app.scope_requirements["transfer.api.globus.org"]]
     assert transfer == ["urn:globus:auth:scope:transfer.api.globus.org:all"]
+
+
+def test_data_access_is_detected_per_collection_type():
+    """Guest collections must not be asked for data_access.
+
+    Only mapped, non-High-Assurance collections use it. Requesting it on
+    a guest collection costs the user a consent prompt for nothing --
+    found when a real ALCF guest collection prompted needlessly.
+    """
+    from globusfs.login import needs_data_access
+
+    class Client:
+        def __init__(self, doc):
+            self.doc = doc
+
+        def get_endpoint(self, cid):
+            return self.doc
+
+    assert needs_data_access(UUID, Client({"entity_type": "GCSv5_mapped_collection"}))
+    assert not needs_data_access(
+        UUID, Client({"entity_type": "GCSv5_guest_collection"})
+    )
+    assert not needs_data_access(
+        UUID, Client({"entity_type": "GCSv5_mapped_collection", "high_assurance": True})
+    )
+
+
+def test_data_access_detection_defaults_to_true_when_unknown():
+    """Erring toward a needless prompt beats omitting a required scope."""
+    from globusfs.login import needs_data_access
+
+    class Broken:
+        def get_endpoint(self, cid):
+            raise RuntimeError("network down")
+
+    assert needs_data_access(UUID) is True  # no client
+    assert needs_data_access(UUID, Broken()) is True

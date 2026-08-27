@@ -28,6 +28,30 @@ DEFAULT_TOKEN_PATH = Path(
 )
 
 
+def needs_data_access(collection_id: str, client=None) -> bool:
+    """True if a collection requires the ``data_access`` scope.
+
+    Only mapped, non-High-Assurance collections do. Guest collections
+    manage access through ACLs and High Assurance ones forbid it, so
+    requesting it where it does not apply costs the user a consent
+    prompt for nothing.
+
+    Needs an authenticated ``TransferClient``: the Transfer API rejects
+    unauthenticated metadata lookups (400, no credentials). Without one,
+    or if the lookup fails, errs toward True -- a needless prompt is a
+    smaller failure than omitting a scope that is genuinely required.
+    """
+    if client is None:
+        return True
+    try:
+        doc = client.get_endpoint(collection_id)
+    except Exception:  # noqa: BLE001 - detection must never block login
+        return True
+    if doc.get("high_assurance"):
+        return False
+    return "guest" not in (doc.get("entity_type") or "").lower()
+
+
 def _require_sdk():
     """Import globus_sdk, or explain how to get it.
 
@@ -71,8 +95,11 @@ def _json_token_storage(globus_sdk):
 def collection_scopes(collection_id: str, data_access: bool = True) -> list[str]:
     """Scopes needed to read one collection over HTTPS.
 
-    ``data_access`` is required for mapped collections that are not High
-    Assurance, and harmless to request otherwise.
+    ``data_access`` applies only to **mapped**, non-High-Assurance
+    collections. Guest and High Assurance collections do not use it, and
+    requesting it there forces an avoidable extra consent prompt -- so
+    pass ``data_access=False`` for those. :func:`login` detects the
+    collection type automatically when it can.
     """
     base = f"https://auth.globus.org/scopes/{collection_id}"
     scopes = [f"{base}/https"]
@@ -85,7 +112,7 @@ def login(
     collection_id: str | None = None,
     client_id: str = DEFAULT_CLIENT_ID,
     token_path: Path | str = DEFAULT_TOKEN_PATH,
-    data_access: bool = True,
+    data_access: bool | None = None,
     run_flow: bool = True,
 ):
     """Log in to Globus and persist tokens.
@@ -96,6 +123,13 @@ def login(
 
     Parameters
     ----------
+    data_access:
+        Whether to request the ``data_access`` scope. ``None`` (default)
+        detects it: mapped non-High-Assurance collections need it, guest
+        and High Assurance collections do not, and asking for it where it
+        does not apply costs an extra consent prompt. Detection is a
+        single unauthenticated metadata lookup; pass True/False to skip
+        it.
     run_flow:
         Set False to build the app without logging in (tests, or when the
         caller drives the flow itself). The returned app will still
@@ -106,6 +140,20 @@ def login(
 
     token_path = Path(token_path)
     token_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if data_access is None and collection_id:
+        # Detection needs an authenticated client, so log in for Transfer
+        # alone first; that consent is needed either way and is not
+        # wasted. Then re-enter with the answer.
+        probe = login(None, client_id, token_path, run_flow=run_flow)
+        try:
+            data_access = needs_data_access(
+                collection_id, globus_sdk.TransferClient(app=probe)
+            )
+        except Exception:  # noqa: BLE001 - fall back to the common case
+            data_access = True
+    elif data_access is None:
+        data_access = False
 
     # Transfer needs data_access as a *dependent* scope, written
     # `transfer:all[*<collection>/data_access]` -- not as a standalone
