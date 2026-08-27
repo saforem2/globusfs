@@ -3,11 +3,14 @@
 An [fsspec](https://filesystem-spec.readthedocs.io/) filesystem for
 [Globus](https://www.globus.org/) collections.
 
-> **Status: working.** Verified end to end against two live collections:
-> authenticated `ls`/`info`/`open` on Globus Tutorial Collection 1, and
-> anonymous pyarrow column projection on a public collection (one column
-> of sixty — a few KB instead of 360 KB) while that collection was
-> intermittently returning backend-fault 404s.
+> **Status: working.** Verified against three live collections —
+> including **ALCF Eagle** (`alcf#dtn_eagle`, 747 project directories),
+> where `ls`, `glob`, `info`, `open()` with mid-file seek, and sparse
+> ranged reads all work against production Lustre. Writes (`PUT`/`DELETE`)
+> round-trip on Globus Tutorial Collection 1. Anonymous pyarrow column
+> projection works on a public collection — one column of sixty, a few KB
+> instead of 360 KB — while that collection was intermittently returning
+> backend-fault 404s.
 
 ```python
 import globusfs
@@ -78,6 +81,24 @@ Verified against a live collection:
   carries the total in `Content-Range`).
 - **The HTTPS interface has no directory listings at all** — hence the
   Transfer API for metadata.
+
+## Known ALCF collections
+
+Resolved via `endpoint_search`; ALCF's docs list names, not UUIDs.
+
+| Collection | UUID | Type |
+|---|---|---|
+| `alcf#dtn_eagle` | `05d2c76a-e867-4f67-aa57-76edeb0beda0` | mapped |
+| `alcf#dtn_flare` | `f39a7a0f-5bfc-46ce-9615-ba9f8592814f` | mapped |
+| `alcf#dtn_grand` | `3caddd4a-bb35-4c3d-9101-d9a0ad7f3a30` | mapped |
+| Globus Tutorials on ALCF Eagle | `a6f165fa-aee2-4fe5-95f3-97429c28bf82` | guest, public |
+
+Eagle's collection root is already `/eagle/projects`, so paths are
+project-relative: `fs.ls("/datascience")`, not `/eagle/projects/datascience`.
+
+Expect roughly **2 s per metadata or read operation** through the DTN —
+fine for sparse reads and exploration, not for per-record access in a
+training loop. See the note on training workloads below.
 
 ## Credentials
 

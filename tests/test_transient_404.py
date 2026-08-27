@@ -7,6 +7,7 @@ to misbehave.
 
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import ClassVar
 
 import pytest
 
@@ -160,3 +161,71 @@ def test_info_falls_back_to_ranged_get(server):
     info = fs(server).info("test-uuid/data.bin")
     assert info["size"] == len(PAYLOAD)
     assert info["type"] == "file"
+
+
+class _WriteHandler(_Handler):
+    """Adds PUT/DELETE, recording what arrived."""
+
+    puts: ClassVar[dict] = {}
+    deletes: ClassVar[list] = []
+    put_fail_times = 0
+    put_seen = 0
+
+    def do_PUT(self):
+        cls = type(self)
+        cls.put_seen += 1
+        n = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(n)
+        if cls.put_seen <= cls.put_fail_times:
+            self.send_response(404)
+            self.send_header("Content-Length", str(len(TRANSIENT_BODY)))
+            self.end_headers()
+            self.wfile.write(TRANSIENT_BODY)
+            return
+        cls.puts[self.path] = body
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_DELETE(self):
+        type(self).deletes.append(self.path)
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+@pytest.fixture
+def write_server():
+    httpd = HTTPServer(("127.0.0.1", 0), _WriteHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    _WriteHandler.puts = {}
+    _WriteHandler.deletes = []
+    _WriteHandler.put_fail_times = 0
+    _WriteHandler.put_seen = 0
+    _WriteHandler.fail_times = 0
+    _WriteHandler.seen = 0
+    yield f"http://127.0.0.1:{httpd.server_port}"
+    httpd.shutdown()
+
+
+def test_pipe_file_uploads(write_server):
+    fs(write_server).pipe_file("test-uuid/out.bin", b"payload")
+    assert _WriteHandler.puts["/out.bin"] == b"payload"
+
+
+def test_write_retries_transient_faults(write_server):
+    """Uploads get the same 404 classification as reads."""
+    _WriteHandler.put_fail_times = 2
+    fs(write_server).pipe_file("test-uuid/out.bin", b"payload")
+    assert _WriteHandler.puts["/out.bin"] == b"payload"
+
+
+def test_rm_file_deletes(write_server):
+    fs(write_server).rm("test-uuid/gone.bin")
+    assert _WriteHandler.deletes == ["/gone.bin"]
+
+
+def test_write_then_read_roundtrip(write_server):
+    f = fs(write_server)
+    f.pipe_file("test-uuid/rt.bin", b"round-trip")
+    assert _WriteHandler.puts["/rt.bin"] == b"round-trip"

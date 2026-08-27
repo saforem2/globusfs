@@ -39,6 +39,7 @@ import asyncio
 import logging
 from typing import Any
 
+from fsspec import AbstractFileSystem
 from fsspec.asyn import sync
 from fsspec.implementations.http import HTTPFileSystem
 
@@ -259,6 +260,51 @@ class GlobusFileSystem(HTTPFileSystem):
 
         return await self._retry(attempt, f"cat_file({path})")
 
+    # --------------------------------------------------------------- write
+
+    async def _pipe_file(self, path, value, mode="overwrite", **kwargs):
+        """Upload bytes with PUT.
+
+        GCS supports PUT on the same URL that serves GET, so writing is a
+        single request. Retried like reads: a backend fault must not be
+        mistaken for a permission or path problem.
+
+        Note there is no server-side atomicity. A PUT that fails partway
+        can leave a truncated object, so callers who need all-or-nothing
+        should write to a temporary name and rename via the Transfer API.
+        """
+        url = self._url(path)
+
+        async def attempt():
+            headers = dict(kwargs.pop("headers", {}))
+            headers.update(self._auth_headers(path))
+            session = await self.set_session()
+            async with session.put(
+                self.encode_url(url), data=value, headers=headers, **self.kwargs
+            ) as r:
+                if r.status >= 400:
+                    await self._check(r, url)
+                return
+
+        return await self._retry(attempt, f"pipe_file({path})")
+
+    async def _rm_file(self, path, **kwargs):
+        """Delete one file with DELETE."""
+        url = self._url(path)
+
+        async def attempt():
+            headers = dict(kwargs.pop("headers", {}))
+            headers.update(self._auth_headers(path))
+            session = await self.set_session()
+            async with session.delete(
+                self.encode_url(url), headers=headers, **self.kwargs
+            ) as r:
+                if r.status >= 400:
+                    await self._check(r, url)
+                return
+
+        return await self._retry(attempt, f"rm_file({path})")
+
     # -------------------------------------------------------------- listing
 
     # NOTE: both the async and sync forms are overridden on purpose.
@@ -383,3 +429,58 @@ class GlobusFileSystem(HTTPFileSystem):
 
     async def _info(self, path, **kwargs):
         return self.info(path, **kwargs)
+
+    # HTTPFileSystem overrides _glob/_exists with logic built on scraping
+    # links out of HTML index pages -- meaningless for a Globus
+    # collection. Delegating to AbstractFileSystem puts them back on top
+    # of ls()/info(), which are Transfer-backed and correct.
+
+    def glob(self, path, maxdepth=None, **kwargs):
+        return AbstractFileSystem.glob(self, path, maxdepth=maxdepth, **kwargs)
+
+    async def _glob(self, path, maxdepth=None, **kwargs):
+        return self.glob(path, maxdepth=maxdepth, **kwargs)
+
+    def find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
+        return AbstractFileSystem.find(
+            self, path, maxdepth=maxdepth, withdirs=withdirs, detail=detail, **kwargs
+        )
+
+    async def _find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
+        return self.find(
+            path, maxdepth=maxdepth, withdirs=withdirs, detail=detail, **kwargs
+        )
+
+    def exists(self, path, **kwargs):
+        """True if the path exists.
+
+        Built on info() rather than the parent's HTTP probe so that a
+        transient backend fault propagates instead of being flattened
+        into "does not exist".
+        """
+        try:
+            self.info(path, **kwargs)
+        except FileNotFoundError:
+            return False
+        return True
+
+    async def _exists(self, path, **kwargs):
+        return self.exists(path, **kwargs)
+
+    def isdir(self, path):
+        try:
+            return self.info(path)["type"] == "directory"
+        except FileNotFoundError:
+            return False
+
+    async def _isdir(self, path):
+        return self.isdir(path)
+
+    def isfile(self, path):
+        try:
+            return self.info(path)["type"] == "file"
+        except FileNotFoundError:
+            return False
+
+    async def _isfile(self, path, **kwargs):
+        return self.isfile(path)
