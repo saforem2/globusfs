@@ -86,10 +86,20 @@ def login(
     client_id: str = DEFAULT_CLIENT_ID,
     token_path: Path | str = DEFAULT_TOKEN_PATH,
     data_access: bool = True,
+    run_flow: bool = True,
 ):
-    """Run the browser login flow and persist tokens.
+    """Log in to Globus and persist tokens.
 
-    Returns a ``globus_sdk.UserApp`` usable for both Transfer and HTTPS.
+    Runs the login flow if the required scopes are not already held, then
+    returns a ``globus_sdk.UserApp`` usable for both Transfer and HTTPS.
+    Calling it again once tokens exist is cheap and does not re-prompt.
+
+    Parameters
+    ----------
+    run_flow:
+        Set False to build the app without logging in (tests, or when the
+        caller drives the flow itself). The returned app will still
+        trigger a login on first use if it lacks tokens.
     """
     globus_sdk = _require_sdk()
     JSONTokenStorage = _json_token_storage(globus_sdk)
@@ -106,9 +116,15 @@ def login(
         # Not the SDK default; without it long runs die on token expiry.
         request_refresh_tokens=True,
     )
-    return globus_sdk.UserApp(
+    app = globus_sdk.UserApp(
         "globusfs", client_id=client_id, config=config, scope_requirements=requirements
     )
+    # Constructing the app does NOT authenticate. Without this the call
+    # returns cleanly, writes no tokens, and the failure only shows up
+    # later as a surprise login prompt from deep inside a read.
+    if run_flow and app.login_required():
+        app.login()
+    return app
 
 
 def filesystem(collection_id: str, app=None, **kwargs):

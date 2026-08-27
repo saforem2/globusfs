@@ -56,19 +56,19 @@ def test_missing_storage_error_names_the_real_problem(monkeypatch):
 
 def test_login_constructs_without_browser(tmp_path):
     """Build the app end to end; only the actual login needs a human."""
-    app = globusfs.login(UUID, token_path=tmp_path / "tokens.json")
+    app = globusfs.login(UUID, token_path=tmp_path / "tokens.json", run_flow=False)
     assert type(app).__name__ == "UserApp"
 
 
 def test_login_requests_refresh_tokens(tmp_path):
     """Not the SDK default. Without it, long runs die on token expiry."""
-    app = globusfs.login(UUID, token_path=tmp_path / "tokens.json")
+    app = globusfs.login(UUID, token_path=tmp_path / "tokens.json", run_flow=False)
     assert app.config.request_refresh_tokens is True
 
 
 def test_login_requests_transfer_and_collection_scopes(tmp_path):
     """Both services are needed: Transfer for ls/info, https for bytes."""
-    app = globusfs.login(UUID, token_path=tmp_path / "tokens.json")
+    app = globusfs.login(UUID, token_path=tmp_path / "tokens.json", run_flow=False)
     reqs = {rs: [str(s) for s in sc] for rs, sc in app.scope_requirements.items()}
     assert (
         "urn:globus:auth:scope:transfer.api.globus.org:all"
@@ -81,7 +81,7 @@ def test_login_requests_transfer_and_collection_scopes(tmp_path):
 def test_token_parent_directory_is_created(tmp_path):
     """Workers load tokens from disk; the path must exist to be written."""
     target = tmp_path / "nested" / "dir" / "tokens.json"
-    globusfs.login(UUID, token_path=target)
+    globusfs.login(UUID, token_path=target, run_flow=False)
     assert target.parent.is_dir()
 
 
@@ -160,3 +160,46 @@ def test_app_credentials_is_thread_safe_by_serializing():
     for t in threads:
         t.join()
     assert out == ["tok-123"] * 8
+
+
+def test_login_actually_runs_the_flow(tmp_path, monkeypatch):
+    """Regression: login() used to construct an app and never log in.
+
+    It returned cleanly, wrote no token file, and the missing
+    authentication only surfaced later as an unexpected browser prompt
+    from inside an unrelated read.
+    """
+    calls = []
+
+    class FakeApp:
+        def __init__(self, *a, **kw):
+            self.config = kw.get("config")
+
+        def login_required(self):
+            return True
+
+        def login(self):
+            calls.append("login")
+
+    monkeypatch.setattr(globus_sdk, "UserApp", FakeApp)
+    globusfs.login(UUID, token_path=tmp_path / "t.json")
+    assert calls == ["login"], "login() must run the flow, not just build the app"
+
+
+def test_login_does_not_reprompt_when_tokens_exist(tmp_path, monkeypatch):
+    """Re-running login() with valid tokens must be a no-op."""
+    calls = []
+
+    class FakeApp:
+        def __init__(self, *a, **kw):
+            self.config = kw.get("config")
+
+        def login_required(self):
+            return False
+
+        def login(self):
+            calls.append("login")
+
+    monkeypatch.setattr(globus_sdk, "UserApp", FakeApp)
+    globusfs.login(UUID, token_path=tmp_path / "t.json")
+    assert calls == []
