@@ -1,0 +1,41 @@
+name: Release
+
+# Publishes to PyPI on a version tag. Uses trusted publishing (OIDC),
+# so there is no API token stored anywhere -- PyPI verifies the identity
+# of this specific workflow in this specific repo.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      # Fail early on malformed metadata rather than at upload.
+      - run: pip install twine && twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Must match the environment name registered with the PyPI publisher.
+    environment: pypi
+    permissions:
+      # Required for trusted publishing; grants nothing else.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

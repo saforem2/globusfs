@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "globusfs"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "fsspec filesystem for Globus collections"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,6 +23,11 @@ dependencies = [
   "fsspec>=2023.1",
   "aiohttp",
 ]
+
+[project.urls]
+Homepage = "https://github.com/saforem2/globusfs"
+Source = "https://github.com/saforem2/globusfs"
+Issues = "https://github.com/saforem2/globusfs/issues"
 
 [project.optional-dependencies]
 # Only needed for Transfer-API listing and GlobusApp-backed credentials.
