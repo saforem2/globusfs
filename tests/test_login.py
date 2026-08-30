@@ -272,3 +272,84 @@ def test_data_access_detection_defaults_to_true_when_unknown():
 
     assert needs_data_access(UUID) is True  # no client
     assert needs_data_access(UUID, Broken()) is True
+
+
+def test_uuid_detection():
+    from globusfs.login import is_uuid
+
+    assert is_uuid(UUID)
+    assert is_uuid(UUID.upper())
+    assert is_uuid(f"  {UUID}  ")
+    assert not is_uuid("alcf#dtn_eagle")
+    assert not is_uuid("my-collection")
+    assert not is_uuid("")
+
+
+class _SearchClient:
+    """Fake TransferClient for endpoint_search."""
+
+    def __init__(self, results):
+        self.results = results
+
+    def endpoint_search(self, name, **kw):
+        return self.results
+
+
+def test_display_name_resolves_to_uuid():
+    """Regression: a display name went straight into a scope URL.
+
+    `globusfs.filesystem("alcf#dtn_eagle")` built
+    `https://auth.globus.org/scopes/alcf#dtn_eagle/https`, which Globus
+    rejects with UNKNOWN_SCOPE_ERROR -- and the `#` truncates the URL as
+    a fragment, making the message doubly confusing. ALCF publishes
+    names rather than UUIDs, so names must resolve.
+    """
+    from globusfs.login import resolve_collection
+
+    client = _SearchClient([{"id": UUID, "display_name": "alcf#dtn_eagle"}])
+    assert resolve_collection("alcf#dtn_eagle", client) == UUID
+
+
+def test_uuid_passes_through_without_a_lookup():
+    from globusfs.login import resolve_collection
+
+    class Boom:
+        def endpoint_search(self, *a, **k):
+            raise AssertionError("must not search when given a UUID")
+
+    assert resolve_collection(UUID, Boom()) == UUID
+
+
+def test_unknown_name_is_a_clear_error():
+    from globusfs.login import resolve_collection
+
+    with pytest.raises(ValueError, match="No Globus collection named"):
+        resolve_collection("nope", _SearchClient([]))
+
+
+def test_ambiguous_name_refuses_to_guess():
+    """Two collections sharing a name must not silently pick one."""
+    from globusfs.login import resolve_collection
+
+    dupes = [
+        {"id": UUID, "display_name": "shared"},
+        {"id": "11111111-2222-3333-4444-555555555555", "display_name": "shared"},
+    ]
+    with pytest.raises(ValueError, match="matches 2 collections"):
+        resolve_collection("shared", _SearchClient(dupes))
+
+
+def test_partial_search_matches_are_ignored():
+    """endpoint_search is fuzzy; only an exact name counts."""
+    from globusfs.login import resolve_collection
+
+    fuzzy = [{"id": UUID, "display_name": "alcf#dtn_eagle_dashboard"}]
+    with pytest.raises(ValueError, match="No Globus collection named"):
+        resolve_collection("alcf#dtn_eagle", _SearchClient(fuzzy))
+
+
+def test_name_without_client_explains_the_fix():
+    from globusfs.login import resolve_collection
+
+    with pytest.raises(ValueError, match="not a collection UUID"):
+        resolve_collection("alcf#dtn_eagle")

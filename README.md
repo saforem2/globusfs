@@ -93,6 +93,11 @@ Resolved via `endpoint_search`; ALCF's docs list names, not UUIDs.
 | `alcf#dtn_grand` | `3caddd4a-bb35-4c3d-9101-d9a0ad7f3a30` | mapped |
 | Globus Tutorials on ALCF Eagle | `a6f165fa-aee2-4fe5-95f3-97429c28bf82` | guest, public |
 
+Display names work too — `globusfs.filesystem("alcf#dtn_eagle")` resolves
+the name to its UUID before building any scopes. (Passing a name to
+`login()` directly requires an authenticated client to resolve it; UUIDs
+never need a lookup.)
+
 Eagle's collection root is already `/eagle/projects`, so paths are
 project-relative: `fs.ls("/datascience")`, not `/eagle/projects/datascience`.
 

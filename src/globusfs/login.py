@@ -17,6 +17,7 @@ Two settings here are load-bearing for HPC use:
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 # Globus's public tutorial native client, intended for exactly this.
@@ -26,6 +27,56 @@ TRANSFER_SCOPE = "urn:globus:auth:scope:transfer.api.globus.org:all"
 DEFAULT_TOKEN_PATH = Path(
     os.environ.get("GLOBUSFS_TOKENS", Path.home() / ".globusfs" / "tokens.json")
 )
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
+
+
+def is_uuid(value: str) -> bool:
+    """True if ``value`` is a collection UUID rather than a display name."""
+    return bool(_UUID_RE.match(value.strip()))
+
+
+def resolve_collection(name: str, client=None) -> str:
+    """Resolve a collection display name to its UUID.
+
+    Globus scopes are built from UUIDs, so a display name interpolated
+    into one produces a scope that does not exist -- and Globus rejects
+    the whole login with ``UNKNOWN_SCOPE_ERROR``. Names containing ``#``
+    (like ``alcf#dtn_eagle``) fail especially confusingly, since the
+    ``#`` also truncates the URL as a fragment.
+
+    ALCF publishes endpoint names rather than UUIDs, so accepting a name
+    is worth the lookup. Needs an authenticated client; raises if the
+    name is ambiguous or not found.
+    """
+    if is_uuid(name):
+        return name.strip()
+    if client is None:
+        raise ValueError(
+            f"{name!r} is not a collection UUID. Names can be resolved, but "
+            f"that needs an authenticated TransferClient -- pass a UUID, or "
+            f"use globusfs.filesystem() which resolves names for you."
+        )
+    matches = [
+        r
+        for r in client.endpoint_search(name, filter_scope="all", limit=10)
+        if (r.get("display_name") or r.get("canonical_name")) == name
+    ]
+    if not matches:
+        raise ValueError(
+            f"No Globus collection named {name!r}. Check the name, or pass "
+            f"the collection UUID directly."
+        )
+    if len(matches) > 1:
+        ids = ", ".join(m["id"] for m in matches[:5])
+        raise ValueError(
+            f"{name!r} matches {len(matches)} collections ({ids}). Pass the "
+            f"UUID you want."
+        )
+    return matches[0]["id"]
 
 
 def needs_data_access(collection_id: str, client=None) -> bool:
@@ -141,6 +192,15 @@ def login(
     token_path = Path(token_path)
     token_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if collection_id and not is_uuid(collection_id):
+        # A display name cannot go into a scope URL: Globus rejects the
+        # login with UNKNOWN_SCOPE_ERROR. Resolve it first, using the
+        # Transfer-only login the detection step needs anyway.
+        probe = login(None, client_id, token_path, run_flow=run_flow)
+        collection_id = resolve_collection(
+            collection_id, globus_sdk.TransferClient(app=probe)
+        )
+
     if data_access is None and collection_id:
         # Detection needs an authenticated client, so log in for Transfer
         # alone first; that consent is needed either way and is not
@@ -203,6 +263,9 @@ def filesystem(collection_id: str, app=None, **kwargs):
 
     app = app or login(collection_id)
     client = globus_sdk.TransferClient(app=app)
+    # login() may have resolved a display name; the filesystem needs the
+    # UUID, since every URL and scope is built from it.
+    collection_id = resolve_collection(collection_id, client)
     return GlobusFileSystem(
         collection_id=collection_id,
         credentials=AppCredentials(app),
