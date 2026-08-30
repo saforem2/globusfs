@@ -23,7 +23,7 @@ with fs.open("data/file.parquet", "rb") as f:
     ...
 ```
 
-Public collections need no credentials — and no `globus-sdk`:
+Public collections need no credentials:
 
 ```python
 import fsspec, pyarrow.parquet as pq

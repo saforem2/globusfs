@@ -116,7 +116,8 @@ def _require_sdk():
     except ImportError as exc:  # pragma: no cover - trivial
         raise ImportError(
             "Logging in to Globus needs globus-sdk. "
-            "Install with: pip install 'globusfs[auth]'"
+            "globus-sdk is a required dependency, so a missing import usually "
+            "means a broken environment: pip install --force-reinstall globusfs"
         ) from exc
     return globus_sdk
 

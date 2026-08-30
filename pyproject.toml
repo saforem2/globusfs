@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "globusfs"
-version = "0.1.0"
+version = "0.2.0"
 description = "fsspec filesystem for Globus collections"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,6 +22,11 @@ dependencies = [
   # needs aiohttp, which fsspec does not pull in on its own.
   "fsspec>=2023.1",
   "aiohttp",
+  # Required for login, Transfer-backed ls/info, and resolving collection
+  # display names. Anonymous public reads technically work without it, but
+  # that is the rare case -- keeping it optional meant the common path
+  # failed with an ImportError telling users to install an extra.
+  "globus-sdk>=3.30",
 ]
 
 [project.urls]
@@ -30,10 +35,9 @@ Source = "https://github.com/saforem2/globusfs"
 Issues = "https://github.com/saforem2/globusfs/issues"
 
 [project.optional-dependencies]
-# Only needed for Transfer-API listing and GlobusApp-backed credentials.
-# Anonymous reads work without it, which is what keeps the test fixture
-# usable in CI with no secrets.
-auth = ["globus-sdk>=3.30"]
+# Kept as an empty alias so `globusfs[auth]` keeps resolving for anyone
+# who installed it while globus-sdk was optional.
+auth = []
 dev = ["pytest", "pytest-asyncio", "ruff>=0.14", "requests"]
 
 # fsspec discovers backends through this entry point group, so
