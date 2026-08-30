@@ -133,6 +133,81 @@ Globus Transfer to node-local scratch beats per-record HTTPS on every
 axis — no per-record latency, no token expiry mid-epoch, and it works
 with formats like ArrayRecord whose readers do their own seeking.
 
+## Pairing with Globus Streaming
+
+[Globus Streaming][streaming] solves a different problem, and the two
+compose rather than compete.
+
+|  | `globusfs` | Globus Streaming |
+|---|---|---|
+| Abstraction | files with byte offsets | TCP socket between two processes |
+| Addressing | `globus://<uuid>/path` | `<host>:<port>` contact string |
+| Random access | yes — `seek`, ranged reads | no; ordered byte stream |
+| Data at rest | reads stored files | no file access at all |
+| Mechanism | HTTPS + Transfer API | `LD_PRELOAD` socket interception |
+| Platform | any Python 3.10+ | Linux x86_64, Python 3.12+ |
+
+Streaming intercepts only connection *establishment* — `bind()`,
+`connect()`, `getaddrinfo` — so unmodified binaries tunnel through
+firewalls with no per-byte overhead, but there is no file to open and no
+offset to seek to. It cannot back an fsspec filesystem. Conversely
+`globusfs` pays an HTTP round-trip per read and cannot see a live feed.
+
+The natural split is **streaming writes it, `globusfs` reads it back**:
+an instrument ships frames to a facility during an experiment, and
+analysis addresses the resulting files afterward.
+
+**During the experiment** — on the instrument host, pipe the detector
+into a socket that Globus tunnels to the facility:
+
+```bash
+# One-time: create a tunnel at https://app.globus.org/streams
+globus-streams environment initialize --globus-contact dtn.alcf.anl.gov:8888 "$TUNNEL_ID"
+
+# Frames leave the instrument through an ordinary TCP socket.
+globus-streams-launch.sh "$TUNNEL_ID" ./detector-stream --host dtn.alcf.anl.gov --port 8888
+```
+
+On the facility side a listener accepts the stream and writes it to the
+collection's filesystem — plain files on Lustre, nothing Globus-specific:
+
+```bash
+globus-streams environment initialize --listener-contact-string 10.0.2.164:8888 "$TUNNEL_ID"
+globus-streams-launch.sh "$TUNNEL_ID" ./ingest --out /eagle/myproject/run042/
+```
+
+**Afterwards** — the frames are now stored files, so `globusfs`
+addresses them from anywhere, no tunnel and no login on the instrument:
+
+```python
+import globusfs
+
+fs = globusfs.filesystem("05d2c76a-e867-4f67-aa57-76edeb0beda0")  # alcf#dtn_eagle
+
+frames = fs.glob("/myproject/run042/*.h5")
+print(f"{len(frames)} frames landed")
+
+# Read only what you need: headers first, before pulling any bulk data.
+for path in frames[:10]:
+    with fs.open(path, "rb") as f:
+        magic = f.read(8)
+        f.seek(fs.info(path)["size"] - 4)
+        footer = f.read(4)
+    print(path, magic, footer)
+```
+
+Why the handoff is clean: streaming's job ends once bytes are on disk,
+and that is exactly where `globusfs` starts. Neither knows about the
+other.
+
+Two caveats. Streaming authenticates every leg of the route but leaves
+end-to-end encryption to your application. And for the analysis pass,
+if you are reading *every* byte of *every* frame repeatedly — training
+rather than inspection — stage with Globus Transfer instead, per the
+note above.
+
+[streaming]: https://docs.globus.org/globus-connect-server/v5/streaming-guide/
+
 ## Tests
 
 Characterization tests hit a real public collection and are marked
