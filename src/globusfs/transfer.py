@@ -35,6 +35,17 @@ def _require_sdk():
     return globus_sdk
 
 
+def _respawn_metadata(fn, kwargs):
+    """Rebuild TransferMetadata in a worker from persisted tokens.
+
+    Module-level so it is picklable by reference.
+    """
+    import globus_sdk
+
+    app = fn(**kwargs)
+    return TransferMetadata(globus_sdk.TransferClient(app=app), respawn=(fn, kwargs))
+
+
 def _stat_to_info(entry: dict[str, Any], path: str) -> dict[str, Any]:
     """Convert a Globus ``file`` document to an fsspec info dict.
 
@@ -63,8 +74,29 @@ class TransferMetadata:
         here so the caller owns login, and so tests can pass a fake.
     """
 
-    def __init__(self, client: Any) -> None:
+    def __init__(self, client: Any, respawn=None) -> None:
         self._client = client
+        # How a worker rebuilds the client after unpickling; see
+        # __reduce__. Without it a live TransferClient is pickled whole,
+        # carrying its authorizer's bearer token into every worker.
+        self._respawn = respawn
+
+    def __reduce__(self):
+        """Rebuild the Transfer client in a worker, don't ship this one.
+
+        A live ``TransferClient`` holds an authorizer holding a bearer
+        token, so pickling it writes that token into every worker payload
+        (~15 KB of mostly credential material). Reconstructing from the
+        token store keeps the secret on disk and lets workers pick up
+        refreshed tokens.
+
+        Falls back to pickling the client when no recipe is supplied --
+        that path is for tests with fake clients, which carry no secrets.
+        """
+        if self._respawn is None:
+            return (TransferMetadata, (self._client,))
+        fn, kwargs = self._respawn
+        return (_respawn_metadata, (fn, kwargs))
 
     @classmethod
     def from_authorizer(cls, authorizer: Any) -> TransferMetadata:

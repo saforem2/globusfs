@@ -250,11 +250,22 @@ def login(
     return app
 
 
-def filesystem(collection_id: str, app=None, **kwargs):
+def filesystem(
+    collection_id: str,
+    app=None,
+    token_path: Path | str = DEFAULT_TOKEN_PATH,
+    client_id: str = DEFAULT_CLIENT_ID,
+    **kwargs,
+):
     """Build a ready-to-use :class:`GlobusFileSystem` for one collection.
 
     Convenience wrapper: logs in if needed, resolves the collection's
     HTTPS URL, and wires up Transfer-backed listing.
+
+    The result is picklable, so it can be sent to dataloader workers or a
+    dask cluster. Workers reload tokens from ``token_path`` rather than
+    receiving them, so on a cluster that path must be reachable from
+    every node -- put it on shared storage.
     """
     import globus_sdk
 
@@ -262,14 +273,30 @@ def filesystem(collection_id: str, app=None, **kwargs):
     from .credentials import AppCredentials
     from .transfer import TransferMetadata
 
-    app = app or login(collection_id)
+    app = app or login(collection_id, client_id, token_path)
     client = globus_sdk.TransferClient(app=app)
     # login() may have resolved a display name; the filesystem needs the
     # UUID, since every URL and scope is built from it.
     collection_id = resolve_collection(collection_id, client)
+
+    # Recipe for rebuilding the app in a worker process. References the
+    # module-level login() by name and carries only the resolved UUID and
+    # a path -- no lock, no live app, no token. run_flow=False so a worker
+    # that finds no usable tokens fails loudly instead of blocking forever
+    # on a browser prompt nobody can answer.
+    respawn = (
+        login,
+        {
+            "collection_id": collection_id,
+            "client_id": client_id,
+            "token_path": str(token_path),
+            "run_flow": False,
+        },
+    )
+
     return GlobusFileSystem(
         collection_id=collection_id,
-        credentials=AppCredentials(app),
-        metadata=TransferMetadata(client),
+        credentials=AppCredentials(app, respawn=respawn),
+        metadata=TransferMetadata(client, respawn=respawn),
         **kwargs,
     )

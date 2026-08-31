@@ -130,6 +130,22 @@ Two constraints worth knowing, both from the globus-sdk docs:
 Also set `request_refresh_tokens=True` — it defaults to `False`, and
 without it a long run dies when the access token expires mid-epoch.
 
+### Workers and clusters
+
+A filesystem from `globusfs.filesystem()` is picklable, so it can be sent
+to dataloader workers or a dask cluster. Workers **reload tokens from
+disk** rather than receiving them, so on a cluster `token_path` must be
+reachable from every node:
+
+```python
+fs = globusfs.filesystem(COLLECTION, token_path="/eagle/myproject/.globus-tokens.json")
+```
+
+Two consequences worth knowing. A worker that finds no usable tokens
+fails immediately instead of blocking on a browser prompt nobody can
+answer — log in once on the head node first. And no bearer token appears
+in the pickled bytes, so the credential stays where you put it.
+
 ## A note on training workloads
 
 This is built for *remote and sparse* reads: column projection,

@@ -115,10 +115,14 @@ class AppCredentials:
       able to *load* tokens rather than acquire them.
     """
 
-    def __init__(self, app, scope_suffix: str = "https") -> None:
+    def __init__(self, app, scope_suffix: str = "https", respawn=None) -> None:
         self._app = app
         self._scope_suffix = scope_suffix
         self._lock = threading.Lock()
+        # How a worker process rebuilds the app after unpickling. Stored
+        # as a plain (callable, kwargs) recipe so no live app object --
+        # and no token -- crosses the process boundary.
+        self._respawn = respawn
 
     def token_for(self, collection_id: str) -> str | None:
         """Current access token for a collection, refreshing if needed.
@@ -136,5 +140,43 @@ class AppCredentials:
                 ensure()
             return getattr(authorizer, "access_token", None)
 
+    def __reduce__(self):
+        """Rebuild in a worker by reloading tokens, not by copying them.
+
+        A ``threading.Lock`` cannot be pickled at all, so without this the
+        whole filesystem fails to reach any worker process -- which breaks
+        every multi-worker dataloader and every dask cluster on the
+        authenticated path.
+
+        The lock is not the only reason to intervene. Shipping a live
+        ``GlobusApp`` would carry its in-memory tokens into every worker
+        payload; reconstructing from the token store instead means the
+        secret stays on disk, where the user already put it, and workers
+        pick up refreshed tokens rather than a stale snapshot.
+
+        Requires a ``respawn`` recipe (:func:`globusfs.login.filesystem`
+        supplies one). Without it, pickling fails loudly rather than
+        silently producing credentials that cannot authenticate.
+        """
+        if self._respawn is None:
+            raise TypeError(
+                "AppCredentials cannot be pickled without a respawn recipe: "
+                "a GlobusApp holds a thread lock and live tokens, neither of "
+                "which should cross into a worker process. Build the "
+                "filesystem with globusfs.filesystem(), which supplies one, "
+                "or use CallableToken to load a token in the worker."
+            )
+        fn, kwargs = self._respawn
+        return (_respawn_app_credentials, (fn, kwargs, self._scope_suffix))
+
     def __repr__(self) -> str:
         return f"AppCredentials(scope_suffix={self._scope_suffix!r})"
+
+
+def _respawn_app_credentials(fn, kwargs, scope_suffix):
+    """Rebuild AppCredentials in a worker by reloading persisted tokens.
+
+    Module-level so it is itself picklable by reference.
+    """
+    app = fn(**kwargs)
+    return AppCredentials(app, scope_suffix=scope_suffix, respawn=(fn, kwargs))

@@ -223,3 +223,39 @@ def test_globus_response_objects_are_unwrapped():
         {"name": "f.txt", "type": "file", "size": 12}
     )
     assert TransferMetadata(client).info(UUID, "f.txt")["size"] == 12
+
+
+def _rebuild_meta_app(**kwargs):
+    """Module-level, picklable by reference."""
+    return object()
+
+
+def test_metadata_without_respawn_pickles_the_client():
+    """Test fakes carry no secrets, so this path stays permissive."""
+    import pickle
+
+    restored = pickle.loads(pickle.dumps(TransferMetadata(FakeClient())))
+    assert isinstance(restored, TransferMetadata)
+
+
+def test_metadata_respawn_keeps_the_token_out_of_the_pickle():
+    """Regression: a live TransferClient smuggled the bearer token.
+
+    AppCredentials.__reduce__ alone was not enough -- the filesystem also
+    holds TransferMetadata, whose client holds an authorizer holding the
+    token. The full pickle was ~15 KB of mostly credential material with
+    the token recoverable from the bytes.
+    """
+    import pickle
+
+    class TokenBearingClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.authorizer_token = "secret-bearer-value"
+
+    meta = TransferMetadata(
+        TokenBearingClient(), respawn=(_rebuild_meta_app, {"collection_id": "x"})
+    )
+    blob = pickle.dumps(meta)
+    assert b"secret-bearer-value" not in blob
+    assert len(blob) < 1000, "a recipe should be small; a live client is not"

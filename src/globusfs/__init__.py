@@ -12,7 +12,7 @@ from .errors import GlobusFSError, TransientBackendError
 from .login import filesystem, login
 from .transfer import TransferMetadata
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "AnonymousCredentials",
