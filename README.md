@@ -154,6 +154,65 @@ Globus Transfer to node-local scratch beats per-record HTTPS on every
 axis — no per-record latency, no token expiry mid-epoch, and it works
 with formats like ArrayRecord whose readers do their own seeking.
 
+## Using it with grain
+
+Grain wants a [`RandomAccessDataSource`][grain-src] — `__len__` plus
+`__getitem__`, thread-safe, picklable, and `__repr__` for checkpointing.
+`globusfs` supplies the bytes; a small source supplies the indexing. This
+one indexes parquet row groups:
+
+```python
+import fsspec
+import pyarrow.parquet as pq
+import grain
+
+
+class ParquetSource:
+    def __init__(self, path, **so):
+        self._path, self._so = path, so
+        self._fs = None
+        with self._open() as f:
+            self._n = pq.ParquetFile(f).metadata.num_row_groups
+
+    def _open(self):
+        # Built lazily so the source stays picklable for grain workers.
+        if self._fs is None:
+            self._fs = fsspec.filesystem("globus", **self._so)
+        return self._fs.open(self._path, "rb")
+
+    def __len__(self):
+        return self._n
+
+    def __getitem__(self, i):
+        with self._open() as f:
+            return pq.ParquetFile(f).read_row_group(int(i), columns=["author"])
+
+    def __getstate__(self):
+        return {**self.__dict__, "_fs": None}  # workers rebuild it
+
+    def __repr__(self):
+        return f"ParquetSource({self._path!r}, n={self._n})"
+
+
+src = ParquetSource(
+    "isaac/ability/ALL_2007-01.parquet",
+    collection_id="isaac",
+    https_url="https://g-05a4b6.2d513.8443.data.globus.org",
+)
+ds = grain.MapDataset.source(src).shuffle(seed=10)
+```
+
+Index row groups rather than individual records. Each `__getitem__` is at
+least one HTTP round-trip, so per-record indexing over a wide-area link
+means one round-trip per record — see the note on training workloads.
+
+Note also that `ArrayRecordDataSource` will not work over `globus://`:
+its reader is C++ and does its own file seeks, so it cannot route through
+a Python filesystem. Formats with Python-level readers (parquet, or your
+own offset index) are the ones that work.
+
+[grain-src]: https://google-grain.readthedocs.io/en/latest/data_sources/protocol.html
+
 ## Pairing with Globus Streaming
 
 [Globus Streaming][streaming] solves a different problem, and the two
