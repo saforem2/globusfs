@@ -30,7 +30,27 @@ pytestmark = pytest.mark.network
 
 BASE = "https://g-05a4b6.2d513.8443.data.globus.org"
 FILE = f"{BASE}/ability/ALL_2007-01.parquet"
-SIZE = 360059  # from the ISAAC manifest
+# The size is discovered, never hardcoded: this is a third-party file on
+# someone else's collection, and it has already been republished once
+# (360059 -> 340194 bytes), breaking tests that pinned the old value.
+# What these tests actually assert is that GCS's range semantics are
+# self-consistent, not that the file has any particular length.
+_SIZE_CACHE: dict[str, int] = {}
+
+
+def file_size() -> int:
+    """Current size of the fixture, from an open-ended ranged GET.
+
+    Deliberately not a HEAD: a HEAD 404 carries no body, so it cannot be
+    told apart from a transient backend fault.
+    """
+    if "size" not in _SIZE_CACHE:
+        r = fetch("GET", FILE, headers={"Range": "bytes=0-"})
+        span = r.headers["Content-Range"].removeprefix("bytes ").partition("/")[0]
+        lo, _, hi = span.partition("-")
+        _SIZE_CACHE["size"] = int(hi) - int(lo) + 1
+    return _SIZE_CACHE["size"]
+
 
 # Marker distinguishing a flaky backend from a real 404.
 TRANSIENT = "ENDPOINT_ERROR"
@@ -74,7 +94,8 @@ def test_midfile_seek():
 
 def test_footer_read_with_absolute_offsets():
     """Parquet footer reads work when addressed absolutely."""
-    r = fetch("GET", FILE, headers={"Range": f"bytes={SIZE - 8}-{SIZE - 1}"})
+    size = file_size()
+    r = fetch("GET", FILE, headers={"Range": f"bytes={size - 8}-{size - 1}"})
     assert r.status_code == 206
     assert r.content.endswith(b"PAR1")
 
@@ -117,7 +138,7 @@ def test_size_via_ranged_get_is_classifiable():
     total = r.headers["Content-Range"].rsplit("/", 1)[-1]
     # GCS may report "*" for total; when it gives a number it must be right.
     if total != "*":
-        assert int(total) == SIZE
+        assert int(total) == file_size()
 
 
 def test_transient_404_is_distinguishable_by_body():
@@ -157,7 +178,10 @@ def test_open_ended_range_reveals_size():
     assert r.status_code == 206
     span = r.headers["Content-Range"].removeprefix("bytes ").partition("/")[0]
     lo, _, hi = span.partition("-")
-    assert int(hi) - int(lo) + 1 == SIZE
+    # Cross-check the discovered extent against Content-Length, which is
+    # the actual invariant: the two must agree with each other.
+    assert int(hi) - int(lo) + 1 == int(r.headers["Content-Length"])
+    assert int(hi) - int(lo) + 1 == file_size()
 
 
 def test_one_byte_probe_hides_total():
