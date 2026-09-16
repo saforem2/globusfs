@@ -259,3 +259,65 @@ def test_metadata_respawn_keeps_the_token_out_of_the_pickle():
     blob = pickle.dumps(meta)
     assert b"secret-bearer-value" not in blob
     assert len(blob) < 1000, "a recipe should be small; a live client is not"
+
+
+# The real error text ALCF returns once a session lapses.
+ALCF_SESSION_ERROR = (
+    "Command Failed: Error (login)\n"
+    "Endpoint: alcf#dtn_eagle (05d2c76a-e867-4f67-aa57-76edeb0beda0)\n"
+    "Message: Login Failed\n---\n"
+    "Details: 530-Login incorrect. : GlobusError: v=1 c=LOGIN_DENIED\n"
+    "530-GridFTP-Message: None of your authenticated identities are from "
+    "domains allowed by resource policies\n"
+    '530-GridFTP-JSON-Result: {"DATA_TYPE": "result#1.1.0", '
+    '"authorization_parameters": {"session_required_single_domain": '
+    '["alcf.anl.gov"]}, "code": "permission_denied", "detail": '
+    '{"DATA_TYPE": "not_from_allowed_domain#1.0.0", "allowed_domains": '
+    '["alcf.anl.gov"]}}\n'
+)
+
+
+def test_expired_session_is_its_own_error():
+    """An expired session is routine and recoverable; say so plainly.
+
+    Raw, it is a wall of GridFTP text whose actionable part -- log in
+    again -- is easy to miss entirely.
+    """
+    from globusfs.errors import SessionExpiredError
+
+    err = FakeTransferError(
+        code="ClientError.AuthenticationFailed", message=ALCF_SESSION_ERROR
+    )
+    with pytest.raises(SessionExpiredError) as exc:
+        fs(metadata=meta(raises=err)).ls(f"globus://{UUID}/data")
+    text = str(exc.value)
+    assert "alcf.anl.gov" in text, "name the domain the collection demands"
+    assert "globusfs.login" in text, "tell the user how to fix it"
+
+
+def test_expired_session_is_not_a_missing_file():
+    """Must not be mistaken for absence, or callers retry the wrong thing."""
+    from globusfs.errors import SessionExpiredError
+
+    err = FakeTransferError(
+        code="ClientError.AuthenticationFailed", message=ALCF_SESSION_ERROR
+    )
+    with pytest.raises(SessionExpiredError) as exc:
+        fs(metadata=meta(raises=err)).ls(f"globus://{UUID}/data")
+    assert not isinstance(exc.value, FileNotFoundError)
+
+
+def test_required_domains_survives_truncated_json():
+    """Globus truncates these blobs; fall back to the readable list."""
+    from globusfs.errors import required_domains
+
+    truncated = ALCF_SESSION_ERROR[:-40]
+    assert "alcf.anl.gov" in required_domains(truncated)
+
+
+def test_ordinary_errors_are_not_session_problems():
+    from globusfs.errors import is_session_problem
+
+    assert not is_session_problem("ClientError.NotFound directory missing")
+    assert not is_session_problem("")
+    assert not is_session_problem(None)

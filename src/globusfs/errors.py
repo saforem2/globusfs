@@ -62,3 +62,56 @@ def is_transient_body(body: str | None) -> bool:
     if any(m in body for m in _PERMANENT_MARKERS):
         return False
     return any(m in body for m in _TRANSIENT_MARKERS)
+
+
+class SessionExpiredError(GlobusFSError):
+    """The identity session no longer satisfies the collection's policy.
+
+    Facilities like ALCF require an identity from a specific domain,
+    authenticated recently. When that lapses, Globus answers with a wall
+    of GridFTP text whose actionable part -- log in again -- is easy to
+    miss:
+
+        530-Login incorrect. : GlobusError: v=1 c=LOGIN_DENIED
+        530-GridFTP-Message: None of your authenticated identities are
+        from domains allowed by resource policies
+        530-GridFTP-JSON-Result: {... "session_required_single_domain":
+        ["alcf.anl.gov"] ...}
+
+    This is recoverable and routine, so it gets its own exception rather
+    than surfacing as a generic API error.
+    """
+
+
+# Markers for an identity/session problem rather than a fault or a miss.
+_SESSION_MARKERS = (
+    "session_required_single_domain",
+    "session_required_identities",
+    "session_required_mfa",
+    "not_from_allowed_domain",
+    "LOGIN_DENIED",
+)
+
+
+def is_session_problem(text: str | None) -> bool:
+    """True if an error indicates an expired or insufficient session."""
+    return bool(text) and any(m in text for m in _SESSION_MARKERS)
+
+
+def required_domains(text: str) -> list[str]:
+    """Extract the domains a collection demands, for the error message.
+
+    Scans for the keys directly rather than parsing the embedded JSON:
+    Globus truncates these blobs mid-document, so json.loads usually
+    fails on exactly the errors worth explaining. Returns [] when it
+    cannot tell, which only costs a less specific message.
+    """
+    import re
+
+    for key in ("session_required_single_domain", "allowed_domains"):
+        m = re.search(rf'"{key}":\s*\[([^\]]*)\]', text or "")
+        if m:
+            found = re.findall(r'"([^"]+)"', m.group(1))
+            if found:
+                return found
+    return []

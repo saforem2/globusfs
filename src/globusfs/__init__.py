@@ -8,7 +8,7 @@ from .credentials import (
     GlobusCredentials,
     StaticToken,
 )
-from .errors import GlobusFSError, TransientBackendError
+from .errors import GlobusFSError, SessionExpiredError, TransientBackendError
 from .login import filesystem, login
 from .transfer import TransferMetadata
 
@@ -21,6 +21,7 @@ __all__ = [
     "GlobusCredentials",
     "GlobusFSError",
     "GlobusFileSystem",
+    "SessionExpiredError",
     "StaticToken",
     "TransferMetadata",
     "TransientBackendError",

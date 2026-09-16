@@ -20,7 +20,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from .errors import TransientBackendError, is_transient_body
+from .errors import (
+    SessionExpiredError,
+    TransientBackendError,
+    is_session_problem,
+    is_transient_body,
+    required_domains,
+)
 
 
 def _require_sdk():
@@ -163,8 +169,20 @@ class TransferMetadata:
         """
         code = getattr(exc, "code", "") or ""
         message = getattr(exc, "message", "") or str(exc)
+        blob = f"{code} {message}"
 
-        if is_transient_body(f"{code} {message}"):
+        if is_session_problem(blob):
+            domains = required_domains(message)
+            need = f" with an identity from {' or '.join(domains)}" if domains else ""
+            return SessionExpiredError(
+                f"Globus session is not valid for {collection_id}{need}. "
+                f"Facilities expire sessions on a timer, so this usually just "
+                f"means logging in again:\n\n"
+                f'    python -c "import globusfs; '
+                f"globusfs.login('{collection_id}')\"\n"
+            )
+
+        if is_transient_body(blob):
             return TransientBackendError(
                 f"{collection_id}:{path}: Globus backend fault ({code}). "
                 f"Transient, not a missing file."
